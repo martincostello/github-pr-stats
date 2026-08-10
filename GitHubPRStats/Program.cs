@@ -15,12 +15,37 @@ bool outputMarkdown = args.Contains("--markdown", StringComparer.OrdinalIgnoreCa
 bool republish = args.Contains("--republish", StringComparer.OrdinalIgnoreCase);
 bool publish = republish || args.Contains("--publish", StringComparer.OrdinalIgnoreCase);
 
+var console = AnsiConsole.Console;
+
+using var cancellation = new CancellationTokenSource();
+
+Console.CancelKeyPress += (_, e) =>
+{
+    if (cancellation.IsCancellationRequested)
+    {
+        return;
+    }
+
+    e.Cancel = true;
+
+    console.MarkupLine("[yellow]Stopping at the next safe point... press Ctrl+C again to quit immediately.[/]");
+    cancellation.Cancel();
+};
+
+var cancellationToken = cancellation.Token;
+
 if (args.Contains("--index", StringComparer.OrdinalIgnoreCase))
 {
-    await index.BuildAsync();
+    try
+    {
+        await index.BuildAsync(cancellationToken);
+    }
+    catch (OperationCanceledException)
+    {
+        return Cancelled(console);
+    }
 }
 
-var console = AnsiConsole.Console;
 var markdown = new StringBuilder();
 
 var pulls = await index.GetPullsAsync();
@@ -28,7 +53,7 @@ var pulls = await index.GetPullsAsync();
 if (pulls.Count is 0)
 {
     console.MarkupLine("[yellow]The cache is empty. Run the tool with [bold]--index[/] to hydrate it from GitHub.[/]");
-    return;
+    return 0;
 }
 
 var user = await index.CurrentUserAsync();
@@ -301,20 +326,34 @@ if (publish)
     var published = republish ? new HashSet<string>(StringComparer.Ordinal) : await index.GetPublishedAsync();
     var repoLanguages = repos.ToDictionary((p) => p.Key, (p) => p.Language, StringComparer.OrdinalIgnoreCase);
 
-    using (var loki = new LokiPublisher(lokiUrl))
+    try
     {
-        try
+        using (var loki = new LokiPublisher(lokiUrl))
         {
-            await loki.PublishAsync(pulls, repoLanguages, published);
+            try
+            {
+                await loki.PublishAsync(pulls, repoLanguages, published, cancellationToken);
+            }
+            finally
+            {
+                await index.SavePublishedAsync(published);
+            }
         }
-        finally
-        {
-            // Save whatever was published, even if a later batch failed, so a re-run resumes.
-            await index.SavePublishedAsync(published);
-        }
-    }
 
-    MetricsPublisher.Publish(otlpUrl, pulls, repos);
+        MetricsPublisher.Publish(otlpUrl, pulls, repos, cancellationToken);
+    }
+    catch (OperationCanceledException)
+    {
+        return Cancelled(console);
+    }
+}
+
+return 0;
+
+static int Cancelled(IAnsiConsole console)
+{
+    console.MarkupLine("[yellow]Stopped before finishing. Re-run the tool to resume data collection.[/]");
+    return 1;
 }
 
 static class StringBuilderExtensions

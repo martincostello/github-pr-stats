@@ -36,49 +36,63 @@ internal sealed class Cache
     /// The first run walks backwards a month at a time from today to the date the account was
     /// created. Subsequent runs only fetch pull requests that have been created or updated since
     /// the previous run, so the tool is cheap to re-run periodically.
+    /// <para/>
+    /// If <paramref name="cancellationToken"/> is signalled the work already done is written to
+    /// the cache before the exception propagates, and the sync watermarks are left where they
+    /// were, so a later run carries on from the last window that completed in full.
     /// </remarks>
-    public async Task BuildAsync()
+    public async Task BuildAsync(CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(_path);
 
-        var me = await CurrentUserAsync();
+        var me = await CurrentUserAsync(cancellationToken);
         var state = await GetStateAsync();
         var pulls = (await GetPullsAsync()).ToDictionary((p) => p.Key);
 
         var now = DateTimeOffset.UtcNow;
         int changed = 0;
 
-        if (state.LastSyncedAt is { } lastSyncedAt)
+        try
         {
-            // Overlap the window by a day so that nothing is missed if the previous run
-            // raced with a pull request being opened, merged or closed as it finished.
-            var since = lastSyncedAt.AddDays(-1);
-
-            Console.WriteLine($"Searching for pull requests updated since {since:u}...");
-
-            changed += await SynchronizeDataAsync(pulls, me, since, now, SearchBy.Updated);
-        }
-
-        var oldest = state.OldestCreated ?? now;
-
-        if (!state.BackfillComplete)
-        {
-            while (oldest > me.CreatedAt)
+            if (state.LastSyncedAt is { } lastSyncedAt)
             {
-                var from = oldest.AddMonths(-1);
+                // Overlap the window by a day so that nothing is missed if the previous run
+                // raced with a pull request being opened, merged or closed as it finished.
+                var since = lastSyncedAt.AddDays(-1);
 
-                Console.WriteLine($"Searching for pull requests created between {from:u} and {oldest:u}...");
+                Console.WriteLine($"Searching for pull requests updated since {since:u}...");
 
-                changed += await SynchronizeDataAsync(pulls, me, from, oldest, SearchBy.Created);
-
-                oldest = from;
-
-                // Checkpoint after each window so an interrupted backfill resumes where it left off.
-                await SavePullsAsync(pulls.Values);
-                await SaveStateAsync(state = state with { OldestCreated = oldest });
+                changed += await SynchronizeDataAsync(pulls, me, since, now, SearchBy.Updated, cancellationToken);
             }
 
-            state = state with { BackfillComplete = true };
+            var oldest = state.OldestCreated ?? now;
+
+            if (!state.BackfillComplete)
+            {
+                while (oldest > me.CreatedAt)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var from = oldest.AddMonths(-1);
+
+                    Console.WriteLine($"Searching for pull requests created between {from:u} and {oldest:u}...");
+
+                    changed += await SynchronizeDataAsync(pulls, me, from, oldest, SearchBy.Created, cancellationToken);
+
+                    oldest = from;
+
+                    // Checkpoint after each window so an interrupted backfill resumes where it left off.
+                    await SavePullsAsync(pulls.Values);
+                    await SaveStateAsync(state = state with { OldestCreated = oldest });
+                }
+
+                state = state with { BackfillComplete = true };
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            await SavePullsAsync(pulls.Values);
+            throw;
         }
 
         await SavePullsAsync(pulls.Values);
@@ -86,11 +100,11 @@ internal sealed class Cache
 
         Console.WriteLine($"Cached {pulls.Count:N0} pull requests ({changed:N0} added or updated).");
 
-        await BuildReposAsync(pulls.Values);
+        await BuildReposAsync(pulls.Values, cancellationToken);
     }
 
-    public async Task<User> CurrentUserAsync()
-        => _user ??= await ExecuteAsync(_github.User.Current);
+    public async Task<User> CurrentUserAsync(CancellationToken cancellationToken = default)
+        => _user ??= await ExecuteAsync(_github.User.Current, cancellationToken);
 
     public async Task<IReadOnlyList<Pull>> GetPullsAsync()
     {
@@ -162,7 +176,7 @@ internal sealed class Cache
         await WriteAsync(PublishedFileName, json.ToJsonString());
     }
 
-    private async Task BuildReposAsync(IEnumerable<Pull> pulls)
+    private async Task BuildReposAsync(IEnumerable<Pull> pulls, CancellationToken cancellationToken)
     {
         var repos = (await GetReposAsync()).ToDictionary((p) => $"{p.Owner}/{p.Name}", StringComparer.OrdinalIgnoreCase);
 
@@ -179,31 +193,38 @@ internal sealed class Cache
 
         Console.WriteLine($"Caching {missing.Count:N0} repositories...");
 
-        foreach (var (owner, name) in missing)
+        try
         {
-            var repo = await GetRepositoryAsync(owner, name);
+            foreach (var (owner, name) in missing)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
 
-            repos[$"{owner}/{name}"] = repo is null
-                ? new(owner, name, "Unknown", $"https://github.com/{owner}/{name}")
-                : new(repo.Owner.Login, repo.Name, repo.Language ?? "Unknown", repo.HtmlUrl);
+                var repo = await GetRepositoryAsync(owner, name, cancellationToken);
+
+                repos[$"{owner}/{name}"] = repo is null
+                    ? new(owner, name, "Unknown", $"https://github.com/{owner}/{name}")
+                    : new(repo.Owner.Login, repo.Name, repo.Language ?? "Unknown", repo.HtmlUrl);
+            }
         }
-
-        await SaveReposAsync(repos.Values);
+        finally
+        {
+            await SaveReposAsync(repos.Values);
+        }
     }
 
-    private async Task<Repository?> GetRepositoryAsync(string owner, string name)
+    private async Task<Repository?> GetRepositoryAsync(string owner, string name, CancellationToken cancellationToken)
     {
         try
         {
             try
             {
-                return await ExecuteAsync(() => _github.Repository.Get(owner, name));
+                return await ExecuteAsync(() => _github.Repository.Get(owner, name), cancellationToken);
             }
             catch (ForbiddenException)
             {
                 // Repo only allows fine-grained access tokens
                 _credentials.Anonymous = true;
-                return await ExecuteAsync(() => _github.Repository.Get(owner, name));
+                return await ExecuteAsync(() => _github.Repository.Get(owner, name), cancellationToken);
             }
             finally
             {
@@ -227,7 +248,8 @@ internal sealed class Cache
         User me,
         DateTimeOffset from,
         DateTimeOffset to,
-        SearchBy searchBy)
+        SearchBy searchBy,
+        CancellationToken cancellationToken)
     {
         var query = new SearchIssuesRequest()
         {
@@ -250,10 +272,11 @@ internal sealed class Cache
         }
 
         int changed = 0;
+        bool hasMorePages = true;
 
-        while (true)
+        while (hasMorePages && !cancellationToken.IsCancellationRequested)
         {
-            var results = await ExecuteAsync(() => _github.Search.SearchIssues(query));
+            var results = await ExecuteAsync(() => _github.Search.SearchIssues(query), cancellationToken);
 
             // The search API never returns more than the first 1,000 matches, so
             // halve the window and try again if the results would be truncated.
@@ -261,8 +284,8 @@ internal sealed class Cache
             {
                 var midpoint = from + ((to - from) / 2);
 
-                return await SynchronizeDataAsync(pulls, me, from, midpoint, searchBy) +
-                       await SynchronizeDataAsync(pulls, me, midpoint, to, searchBy);
+                return await SynchronizeDataAsync(pulls, me, from, midpoint, searchBy, cancellationToken) +
+                       await SynchronizeDataAsync(pulls, me, midpoint, to, searchBy, cancellationToken);
             }
 
             foreach (var issue in results.Items)
@@ -299,13 +322,11 @@ internal sealed class Cache
                 }
             }
 
-            if (results.Items.Count < query.PerPage)
-            {
-                break;
-            }
-
+            hasMorePages = results.Items.Count >= query.PerPage;
             query.Page++;
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         return changed;
     }
@@ -413,9 +434,9 @@ internal sealed class Cache
         File.Move(temporary, path, overwrite: true);
     }
 
-    private static async Task<T> ExecuteAsync<T>(Func<Task<T>> operation)
+    private static async Task<T> ExecuteAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken)
     {
-        while (true)
+        while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
@@ -425,15 +446,17 @@ internal sealed class Cache
             {
                 var delay = ex.GetRetryAfterTimeSpan().Add(TimeSpan.FromSeconds(2));
                 Console.WriteLine($"Rate limit exceeded. Waiting for {delay}...");
-                await Task.Delay(delay);
+                await Task.Delay(delay, cancellationToken);
             }
             catch (SecondaryRateLimitExceededException)
             {
                 var delay = TimeSpan.FromMinutes(2);
                 Console.WriteLine($"Secondary rate limit exceeded. Waiting for {delay}...");
-                await Task.Delay(delay);
+                await Task.Delay(delay, cancellationToken);
             }
         }
+
+        throw new OperationCanceledException(cancellationToken);
     }
 
     private enum SearchBy

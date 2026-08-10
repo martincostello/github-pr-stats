@@ -31,7 +31,8 @@ internal sealed class LokiPublisher(Uri endpoint) : IDisposable
     public async Task<int> PublishAsync(
         IReadOnlyList<Cache.Pull> pulls,
         IReadOnlyDictionary<string, string> languages,
-        HashSet<string> published)
+        HashSet<string> published,
+        CancellationToken cancellationToken)
     {
         var pending = pulls.Where((p) => !published.Contains(p.Key))
                            .OrderBy((p) => p.Created)
@@ -47,8 +48,12 @@ internal sealed class LokiPublisher(Uri endpoint) : IDisposable
 
         Console.WriteLine($"Publishing {pending.Count:N0} pull requests to Loki at {endpoint}...");
 
+        int count = 0;
+
         foreach (var batch in pending.Chunk(BatchSize))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             var streams = new JsonArray();
 
             // Keep the number of streams low by only using labels of a low cardinality;
@@ -88,11 +93,11 @@ internal sealed class LokiPublisher(Uri endpoint) : IDisposable
             var payload = new JsonObject() { ["streams"] = streams };
 
             using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
-            using var response = await _client.PostAsync(url, content);
+            using var response = await _client.PostAsync(url, content, cancellationToken);
 
             if (!response.IsSuccessStatusCode)
             {
-                var error = await response.Content.ReadAsStringAsync();
+                var error = await response.Content.ReadAsStringAsync(CancellationToken.None);
                 throw new InvalidOperationException(
                     $"Failed to publish {batch.Length} pull requests to Loki. {(int)response.StatusCode} {response.ReasonPhrase}: {error}");
             }
@@ -101,11 +106,13 @@ internal sealed class LokiPublisher(Uri endpoint) : IDisposable
             {
                 published.Add(pull.Key);
             }
+
+            count += batch.Length;
         }
 
-        Console.WriteLine($"Published {pending.Count:N0} pull requests to Loki.");
+        Console.WriteLine($"Published {count:N0} pull requests to Loki.");
 
-        return pending.Count;
+        return count;
     }
 
     public void Dispose() => _client.Dispose();

@@ -20,8 +20,14 @@ internal static class MetricsPublisher
 {
     private const string MeterName = "GitHubPRStats";
 
-    public static void Publish(Uri endpoint, IReadOnlyList<Cache.Pull> pulls, IReadOnlyList<Cache.Repo> repos)
+    public static void Publish(
+        Uri endpoint,
+        IReadOnlyList<Cache.Pull> pulls,
+        IReadOnlyList<Cache.Repo> repos,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         var languages = repos.ToDictionary((p) => p.Key, (p) => p.Language, StringComparer.OrdinalIgnoreCase);
 
         using var provider = Sdk
