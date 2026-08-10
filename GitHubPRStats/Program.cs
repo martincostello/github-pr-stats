@@ -11,22 +11,26 @@ var configuration = new ConfigurationBuilder()
 var token = configuration["GITHUB_TOKEN"] ?? throw new InvalidOperationException("No GitHub token specified.");
 var index = new Cache(".github", token);
 
-bool outputMarkdown = false;
+bool outputMarkdown = args.Contains("--markdown", StringComparer.OrdinalIgnoreCase);
+bool republish = args.Contains("--republish", StringComparer.OrdinalIgnoreCase);
+bool publish = republish || args.Contains("--publish", StringComparer.OrdinalIgnoreCase);
 
 if (args.Contains("--index", StringComparer.OrdinalIgnoreCase))
 {
     await index.BuildAsync();
 }
 
-if (args.Contains("--markdown", StringComparer.OrdinalIgnoreCase))
-{
-    outputMarkdown = true;
-}
-
 var console = AnsiConsole.Console;
 var markdown = new StringBuilder();
 
 var pulls = await index.GetPullsAsync();
+
+if (pulls.Count is 0)
+{
+    console.MarkupLine("[yellow]The cache is empty. Run the tool with [bold]--index[/] to hydrate it from GitHub.[/]");
+    return;
+}
+
 var user = await index.CurrentUserAsync();
 
 markdown.AppendLine("# GitHub PR Stats")
@@ -284,6 +288,33 @@ markdown.AppendLine("## By Language")
 if (outputMarkdown)
 {
     await File.WriteAllTextAsync("summary.md", markdown.ToString());
+}
+
+if (publish)
+{
+    var lokiUrl = new Uri(configuration["LOKI_URL"] ?? "http://localhost:3100", UriKind.Absolute);
+    var otlpUrl = new Uri(configuration["OTLP_ENDPOINT"] ?? "http://localhost:4318", UriKind.Absolute);
+
+    // The pull requests already in Loki are tracked locally because Loki is append-only,
+    // so re-publishing them would double count them. Use --republish after recreating the
+    // Docker volume to hydrate a brand new Grafana instance from the cache.
+    var published = republish ? new HashSet<string>(StringComparer.Ordinal) : await index.GetPublishedAsync();
+    var repoLanguages = repos.ToDictionary((p) => p.Key, (p) => p.Language, StringComparer.OrdinalIgnoreCase);
+
+    using (var loki = new LokiPublisher(lokiUrl))
+    {
+        try
+        {
+            await loki.PublishAsync(pulls, repoLanguages, published);
+        }
+        finally
+        {
+            // Save whatever was published, even if a later batch failed, so a re-run resumes.
+            await index.SavePublishedAsync(published);
+        }
+    }
+
+    MetricsPublisher.Publish(otlpUrl, pulls, repos);
 }
 
 static class StringBuilderExtensions

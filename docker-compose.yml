@@ -1,0 +1,23 @@
+name: github-pr-stats
+
+services:
+  lgtm:
+    image: grafana/otel-lgtm:0.30.1
+    container_name: github-pr-stats-lgtm
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "3100:3100"
+      - "4317:4317"
+      - "4318:4318"
+      - "9090:9090"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/dashboards/github-pr-stats.json
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=10y --storage.tsdb.retention.size=0
+    volumes:
+      - ./data/lgtm:/data
+      - ./grafana/dashboards/github-pr-stats.json:/otel-lgtm/dashboards/github-pr-stats.json:ro
+      - ./grafana/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
+      - ./grafana/provisioning/dashboards/github-pr-stats.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/github-pr-stats.yaml:ro

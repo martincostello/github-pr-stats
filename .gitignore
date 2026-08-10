@@ -486,3 +486,6 @@ $RECYCLE.BIN/
 .github/
 GitHubPRStats/Properties/launchSettings.json
 summary.md
+
+# The persistent volume mapped into the docker-otel-lgtm container
+/data/

@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: "GitHub PR Stats"
+    type: file
+    allowUiUpdates: false
+    options:
+      path: /otel-lgtm/dashboards/github-pr-stats.json
+      foldersFromFilesStructure: false
