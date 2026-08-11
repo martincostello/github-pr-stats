@@ -22,7 +22,7 @@ internal sealed class LokiPublisher(Uri endpoint) : IDisposable
 
     private const int BatchSize = 500;
 
-    private readonly HttpClient _client = new() { Timeout = TimeSpan.FromMinutes(2) };
+    private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(30) };
 
     /// <summary>
     /// Publishes any pull requests that are not already in <paramref name="published"/>, adding
@@ -92,15 +92,7 @@ internal sealed class LokiPublisher(Uri endpoint) : IDisposable
 
             var payload = new JsonObject() { ["streams"] = streams };
 
-            using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
-            using var response = await _client.PostAsync(url, content, cancellationToken);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                var error = await response.Content.ReadAsStringAsync(CancellationToken.None);
-                throw new InvalidOperationException(
-                    $"Failed to publish {batch.Length} pull requests to Loki. {(int)response.StatusCode} {response.ReasonPhrase}: {error}");
-            }
+            await SendAsync(url, payload, batch.Length, cancellationToken);
 
             foreach (var pull in batch)
             {
@@ -113,6 +105,39 @@ internal sealed class LokiPublisher(Uri endpoint) : IDisposable
         Console.WriteLine($"Published {count:N0} pull requests to Loki.");
 
         return count;
+    }
+
+    private async Task SendAsync(Uri url, JsonObject payload, int count, CancellationToken cancellationToken)
+    {
+        using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+
+        HttpResponseMessage response;
+
+        try
+        {
+            response = await _client.PostAsync(url, content, cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException(
+                $"Could not connect to Loki at {endpoint}. Is the Docker Compose stack running?", ex);
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Loki at {endpoint} accepted the connection but did not reply within {_client.Timeout:g}. Is it still starting up?", ex);
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(CancellationToken.None);
+
+                throw new InvalidOperationException(
+                    $"Failed to publish {count} pull requests to Loki. {(int)response.StatusCode} {response.ReasonPhrase}: {error}");
+            }
+        }
     }
 
     public void Dispose() => _client.Dispose();

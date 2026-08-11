@@ -23,7 +23,7 @@ Open <http://localhost:3000> and the dashboard is the Grafana home page.
 
 | Option | Description |
 | :----- | :---------- |
-| `--index` | Fetch pull requests from GitHub into the local cache in `.github`. |
+| `--index` | Fetch pull requests from GitHub into the local cache in `.github-data`. |
 | `--publish` | Publish the cache to Grafana. |
 | `--republish` | Publish _everything_ in the cache to Grafana, ignoring what has been published before. |
 | `--markdown` | Write a `summary.md` file as well as printing to the console. |
@@ -55,7 +55,7 @@ The pull requests are split across two of those backends, based on what can chan
 - **Loki** stores one entry per pull request, timestamped with the date the pull request was
   opened. This is the history, and it only contains facts that never change - which repository
   the pull request was opened against, its number and its URL. Loki is append-only, so the tool
-  keeps track of what it has already published in `.github/published.json` and never sends the
+  keeps track of what it has already published in `.github-data/published.json` and never sends the
   same pull request twice.
 - **Prometheus** stores the aggregated counts - by state, by whether it was merged, by owner, by
   repository, by language and by year - written over OTLP each time the tool runs. These are
