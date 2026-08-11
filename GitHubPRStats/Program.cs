@@ -9,7 +9,7 @@ var configuration = new ConfigurationBuilder()
     .Build();
 
 var token = configuration["GITHUB_TOKEN"] ?? throw new InvalidOperationException("No GitHub token specified.");
-var index = new Cache(".github", token);
+var index = new Cache(".github-data", token);
 
 bool outputMarkdown = args.Contains("--markdown", StringComparer.OrdinalIgnoreCase);
 bool republish = args.Contains("--republish", StringComparer.OrdinalIgnoreCase);
@@ -40,7 +40,7 @@ if (args.Contains("--index", StringComparer.OrdinalIgnoreCase))
     {
         await index.BuildAsync(cancellationToken);
     }
-    catch (OperationCanceledException)
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
         return Cancelled(console);
     }
@@ -342,7 +342,7 @@ if (publish)
 
         MetricsPublisher.Publish(otlpUrl, pulls, repos, cancellationToken);
     }
-    catch (OperationCanceledException)
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
         return Cancelled(console);
     }
