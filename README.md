@@ -47,8 +47,8 @@ you want to bring the data up-to-date:
 
 The `docker-compose.yml` runs [`grafana/otel-lgtm`][docker-otel-lgtm], which bundles Grafana,
 Loki, Prometheus, Tempo and an OpenTelemetry collector into a single container. Everything it
-persists is written to `./data/lgtm`, which is mapped into the container as `/data`, so the data
-survives the container being recreated.
+persists is written to the `lgtm-data` Docker volume, which is mapped into the container as
+`/data`, so the data survives the container being recreated.
 
 The pull requests are split across two of those backends, based on what can change over time:
 
@@ -70,8 +70,7 @@ the schema in 2007 so entries predating Loki's default schema date can be writte
 To start from scratch, delete the volume and re-publish the cache:
 
 ```console
-docker compose down
-rm -rf ./data
+docker compose down -v
 docker compose up -d
 dotnet run --project GitHubPRStats -- --republish
 ```
